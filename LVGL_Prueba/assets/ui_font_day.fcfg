@@ -1,0 +1,16 @@
+{
+  "codename": "day",
+  "ttf_path": "\\assets\\bahnschrift.ttf",
+  "bin_path": "\\assets\\ui_font_day.bin",
+  "c_path": "\\assets\\ui_font_day.c",
+  "cfg_path": "\\assets\\ui_font_day.fcfg",
+  "size": 24,
+  "bpp": 1,
+  "letters": 0,
+  "ranges": [
+    "0x20-0x7f"
+  ],
+  "symbols": "",
+  "customparams": "--no-compress --no-prefilter",
+  "uploaded": false
+}
