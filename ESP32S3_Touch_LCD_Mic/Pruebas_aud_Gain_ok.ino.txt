@@ -1,0 +1,242 @@
+/*
+  Grabador I2S -> WAV con GANANCIA digital
+  Mantiene: pines, SAMPLE_RATE, formato WAV (16kHz) y duración fija 10s.
+  Nota: el mic entrega 24-bit dentro de 32-bit words; guardamos 16-bit PCM.
+*/
+
+#include <Arduino.h>
+#include <SD_MMC.h>
+#include "driver/i2s.h"
+
+// ----------------- CONFIG -----------------
+#define SAMPLE_RATE     16000                       // 16 kHz
+#define I2S_BITS_IN_OUT 32                          // leer 32-bit words (mic 24-bit en contenedor 32)
+#define I2S_READ_BYTES  2048                        // bytes por i2s_read() (múltiplo de 4)
+#define RECORD_SECONDS  10
+#define CHANNELS_OUT    1                           // mono (LEFT)
+
+#define I2S_PIN_BCK   15
+#define I2S_PIN_WS     2
+#define I2S_PIN_DIN   39
+#define I2S_PIN_DOUT  -1
+
+#define SD_PIN_CLK  14
+#define SD_PIN_CMD  17
+#define SD_PIN_D0   16
+
+// --------- GANANCIA (ajustable) ----------
+const float MIC_GAIN = 3.0f; // 1.0 = sin cambio, >1.0 aumenta ganancia
+
+// ----------------- WAV header util -----------------
+void write_wav_header(File &f, uint32_t sampleRate, uint16_t bitsPerSample, uint16_t channels, uint32_t dataBytes) {
+  uint32_t byteRate = sampleRate * channels * bitsPerSample / 8;
+  uint16_t blockAlign = channels * bitsPerSample / 8;
+  uint32_t chunkSize = 36 + dataBytes;
+
+  uint8_t header[44] = {0};
+  // "RIFF"
+  header[0] = 'R'; header[1] = 'I'; header[2] = 'F'; header[3] = 'F';
+  // chunk size
+  header[4] = (uint8_t)(chunkSize & 0xFF);
+  header[5] = (uint8_t)((chunkSize >> 8) & 0xFF);
+  header[6] = (uint8_t)((chunkSize >> 16) & 0xFF);
+  header[7] = (uint8_t)((chunkSize >> 24) & 0xFF);
+  // "WAVE"
+  header[8] = 'W'; header[9] = 'A'; header[10] = 'V'; header[11] = 'E';
+  // "fmt "
+  header[12] = 'f'; header[13] = 'm'; header[14] = 't'; header[15] = ' ';
+  // Subchunk1Size (16 for PCM)
+  header[16] = 16; header[17] = 0; header[18] = 0; header[19] = 0;
+  // AudioFormat (1 = PCM)
+  header[20] = 1; header[21] = 0;
+  // NumChannels
+  header[22] = (uint8_t)channels; header[23] = 0;
+  // SampleRate
+  header[24] = (uint8_t)(sampleRate & 0xFF);
+  header[25] = (uint8_t)((sampleRate >> 8) & 0xFF);
+  header[26] = (uint8_t)((sampleRate >> 16) & 0xFF);
+  header[27] = (uint8_t)((sampleRate >> 24) & 0xFF);
+  // ByteRate
+  header[28] = (uint8_t)(byteRate & 0xFF);
+  header[29] = (uint8_t)((byteRate >> 8) & 0xFF);
+  header[30] = (uint8_t)((byteRate >> 16) & 0xFF);
+  header[31] = (uint8_t)((byteRate >> 24) & 0xFF);
+  // BlockAlign
+  header[32] = (uint8_t)(blockAlign & 0xFF);
+  header[33] = (uint8_t)((blockAlign >> 8) & 0xFF);
+  // BitsPerSample
+  header[34] = (uint8_t)(bitsPerSample & 0xFF);
+  header[35] = (uint8_t)((bitsPerSample >> 8) & 0xFF);
+  // "data"
+  header[36] = 'd'; header[37] = 'a'; header[38] = 't'; header[39] = 'a';
+  // data size
+  header[40] = (uint8_t)(dataBytes & 0xFF);
+  header[41] = (uint8_t)((dataBytes >> 8) & 0xFF);
+  header[42] = (uint8_t)((dataBytes >> 16) & 0xFF);
+  header[43] = (uint8_t)((dataBytes >> 24) & 0xFF);
+
+  f.seek(0);
+  f.write(header, 44);
+}
+
+// ----------------- I2S init -----------------
+bool init_i2s_standard_rx() {
+  Serial.println("Configurando I2S (Modo Estandar RX) ... ");
+  
+  i2s_driver_uninstall(I2S_NUM_0);
+
+  i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+    .sample_rate = SAMPLE_RATE,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+    .communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_STAND_I2S),
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 4,
+    .dma_buf_len = 512,
+    .use_apll = false,
+    .tx_desc_auto_clear = false,
+    .fixed_mclk = 0
+  };
+
+  esp_err_t err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+  if (err != ESP_OK) {
+    Serial.printf("i2s_driver_install err: %d\n", err);
+    return false;
+  }
+
+  i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_PIN_BCK,
+    .ws_io_num  = I2S_PIN_WS,
+    .data_out_num = I2S_PIN_DOUT,
+    .data_in_num  = I2S_PIN_DIN
+  };
+
+  err = i2s_set_pin(I2S_NUM_0, &pin_config);
+  if (err != ESP_OK) {
+    Serial.printf("i2s_set_pin err: %d\n", err);
+    return false;
+  }
+
+  // Configurar reloj: contenedor 32-bit, stereo slots (leer LEFT)
+  err = i2s_set_clk(I2S_NUM_0, SAMPLE_RATE, I2S_BITS_PER_SAMPLE_32BIT, I2S_CHANNEL_STEREO);
+  if (err != ESP_OK) {
+    Serial.printf("i2s_set_clk err: %d\n", err);
+    return false;
+  }
+
+  i2s_zero_dma_buffer(I2S_NUM_0);
+  Serial.println("I2S configurado correctamente");
+  return true;
+}
+
+// ----------------- Principal -----------------
+void setup() {
+  Serial.begin(115200);
+  delay(400);
+  Serial.println("\n=== INICIANDO GRABADORA I2S -> WAV ===");
+
+  // Inicializar SD_MMC con pines del S3 TOUCH LCD
+  Serial.println("Inicializando SD_MMC...");
+  SD_MMC.setPins(SD_PIN_CLK, SD_PIN_CMD, SD_PIN_D0, -1, -1, -1);
+  if (!SD_MMC.begin("/sdcard", true)) {             // true = 1-bit mode
+    Serial.println("ERROR: SD_MMC.begin() falló");
+    while (true) { delay(1000); }
+  }
+  Serial.println("SD_MMC inicializada OK");
+  uint64_t sz = SD_MMC.cardSize() / (1024 * 1024);
+  Serial.printf("Tamaño SD: %llu MB\n", sz);
+
+  // Inicializar I2S
+  if (!init_i2s_standard_rx()) {
+    Serial.println("ERROR: init I2S failed");
+    while (true) { delay(1000); }
+  }
+
+  Serial.println("Listo. Empezará grabación en 2s...");
+  delay(2000);
+}
+
+void loop() {
+  const char *filename = "/record_test.wav";
+  Serial.printf("Creando archivo %s ...\n", filename);
+  File f = SD_MMC.open(filename, FILE_WRITE);
+  if (!f) {
+    Serial.println("ERROR: no pudo abrir archivo en SD");
+    while (true) delay(1000);
+  }
+
+  // reservar header (44 bytes)
+  uint8_t zero44[44] = {0};
+  f.write(zero44, 44);
+
+  uint32_t bytes_pcm = 0;
+  uint8_t readBuf[I2S_READ_BYTES];
+
+  Serial.printf("Grabando %d segundos...\n", RECORD_SECONDS);
+
+  uint32_t start = millis();
+  bool printedSamples = false;
+  while ((millis() - start) < (uint32_t)RECORD_SECONDS * 1000) {
+    size_t bytesRead = 0;
+    esp_err_t r = i2s_read(I2S_NUM_0, readBuf, I2S_READ_BYTES, &bytesRead, portMAX_DELAY);
+    if (r != ESP_OK) {
+      Serial.printf("i2s_read err: %d\n", r);
+      break;
+    }
+    if (bytesRead == 0) continue;
+
+    // bytesRead debe ser múltiplo de 4 (32-bit words)
+    int samples = bytesRead / 4;                    // Número de 32-bit words
+    int32_t *words = (int32_t *)readBuf;
+
+    // debug: Imprimir las primeras palabras sin procesar (hexadecimales) una vez
+    if (!printedSamples) {
+      Serial.println("DBG: primeros 8 muestras (raw 32-bit hex / signed):");
+      int toPrint = min(samples, 8);
+      for (int i = 0; i < toPrint; ++i) {
+        int32_t v = words[i];
+        Serial.printf("  [%02d] 0x%08X  %d\n", i, (uint32_t)v, v);
+      }
+      printedSamples = true;
+    }
+
+    // Convertir cada word 32-bit (24-bit data left aligned) -> int16_t PCM
+    // Aplicar GANANCIA y anti-clipping
+    for (int i = 0; i < samples; ++i) {
+      int32_t w = words[i];
+      // Aquí usamos shift >>16 (esta conversión funcionó con tu mic y placa)
+      int16_t sample16 = (int16_t)(w >> 16);
+
+      // aplicar ganancia en float
+      float amplified = (float)sample16 * MIC_GAIN;
+
+      // anti-clip
+      if (amplified > 32767.0f) amplified = 32767.0f;
+      if (amplified < -32768.0f) amplified = -32768.0f;
+
+      int16_t out16 = (int16_t)amplified;
+      f.write((uint8_t *)&out16, sizeof(out16));
+      bytes_pcm += sizeof(out16);
+    }
+
+    // Progreso
+    static uint32_t lastPrint = 0;
+    if (millis() - lastPrint > 500) {
+      Serial.printf("Grabando... %u bytes\r", bytes_pcm);
+      lastPrint = millis();
+    }
+  }
+
+  Serial.println("\nGrabación Finalizada.");
+
+  // actualizar header WAV -> estamos guardando 16-bit PCM
+  write_wav_header(f, SAMPLE_RATE, I2S_BITS_IN_OUT, CHANNELS_OUT, bytes_pcm);
+  f.close();
+
+  Serial.printf("Archivo guardado: %s  (bytes PCM=%u)\n", filename, bytes_pcm);
+  Serial.println("FIN. Revisa el archivo en la SD (16kHz, 32-bit, mono).");
+
+  // detener (no repetir)
+  while (true) delay(1000);
+}
