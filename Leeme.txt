@@ -1,0 +1,45 @@
+Proyecto: ESP32S3_Touch_LCD_Mic
+Dispositivo: ESP32-S3-Touch-LCD-1.46B
+Descripción: Inicializar dispositivo lectura de MicroSD y Pantalla SPD2010, el cual trata de un botón para inicia grabación de sonido por 10 segundos. Solo graba, mas no reproduce.
+  
+Realizado en: IDE Arduino (versión 2.3.6)
+  Sketch integrado:
+  - Display SPD2010 (con Display_SPD2010.*)
+  - Touch SPD2010 (Touch_SPD2010.*)
+  - LVGL (LVGL_Driver.*)
+  - I2S -> WAV recorder (ganancia, anti-clip)
+  - UI: botón GRABAR / DETENER y etiquetas de estado
+
+  Requiere librerías para ESP32-S3-Touch-LCD-1.46B
+  - Display_SPD2010.h
+  - Display_SPD2010.cpp
+  - I2C_Driver.h
+  - I2C_Driver.cpp
+  - LVGL_Driver.cpp
+  - LVGL_Driver.h
+  - TCA9554PWR.h
+  - TCA9554PWR.cpp
+  - Touch_SPD2010.h
+  - Touch_SPD2010.cpp
+  - esp_lcd_spd2010.h
+  - esp_lcd_spd2010.c
+
+
+Modo de uso:
+
+1. Copiar carpeta del proyecto "ESP32S3_Touch_LCD_Mic" dentro de la carpeta de proyectos de Arduino
+
+2. Copiar la carpeta de "lvgl" dentro de la carpeta de libraries del IDE de Arduino. Se recomienda usar esta carpeta "lvgl", debido a que ya posee todas las configuraciones pertinentes para el funcionamiento del proyecto.
+	Nota: Si ya tiene previamente instalada la biblioteca de lvgl, se recomienda mover la carpeta a otra ruta para que no genere conflicto al pegar la carpeta "lvgl" copiada de este proyecto.
+
+3. Ejecutar el archivo ESP32S3_Touch_LCD_Mic.ino que está dentro de la carpeta ESP32S3_Touch_LCD_Mic.
+
+4. Tener en cuenta las configuraciones básicas en Herramientas del IDE Arduino antes de compilar y cargar al dispositivo.
+
+	Placa: ESP32S3 Dev Module [del gestor de placas - esp32 v3.3.3)]
+	Puerto: COM# [el correspondiente al dispositivo conectado al puerto USB]
+	USB CDC On Boot: Enabled
+	Flash Mode: QIO 80MHZ
+	Flash Size: 16MB (128Mb)
+	Partition Schem: 16M Flash (3MB APP/9.9MB FATFS)
+	PSRAM: QSPI PSRAM
